@@ -41,9 +41,13 @@ func NewClient(token string, options ...ClientOption) *Slacker {
 		rtm:               client.NewRTM(),
 		commandChannel:    make(chan *CommandEvent, 100),
 		unAuthorizedError: unAuthorizedError,
+		eventHandler: DefaultEventHandler,
 	}
 	return slacker
 }
+
+// EventHandler handles an incoming RTM event.
+type EventHandler func(ctx context.Context, s *Slacker, msg slack.RTMEvent) error
 
 // Slacker contains the Slack API, botCommands, and handlers
 type Slacker struct {
@@ -58,6 +62,8 @@ type Slacker struct {
 	helpDefinition        *CommandDefinition
 	defaultMessageHandler func(botCtx BotContext, request Request, response ResponseWriter)
 	defaultEventHandler   func(interface{})
+	fallbackEventHandler  func(interface{})
+	eventHandler          EventHandler
 	unAuthorizedError     error
 	commandChannel        chan *CommandEvent
 }
@@ -104,7 +110,12 @@ func (s *Slacker) DefaultCommand(defaultMessageHandler func(botCtx BotContext, r
 
 // DefaultEvent handle events when an unknown event is seen
 func (s *Slacker) DefaultEvent(defaultEventHandler func(interface{})) {
-	s.defaultEventHandler = defaultEventHandler
+	s.fallbackEventHandler = defaultEventHandler
+}
+
+// EventHandler configures the handler for each incoming RTM event
+func (s *Slacker) EventHandler(eventHandler EventHandler) {
+	s.eventHandler = eventHandler
 }
 
 // UnAuthorizedError error message
@@ -141,37 +152,10 @@ func (s *Slacker) Listen(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			switch event := msg.Data.(type) {
-			case *slack.ConnectedEvent:
-				if s.initHandler == nil {
-					continue
-				}
-				go s.initHandler()
 
-			case *slack.MessageEvent:
-				if s.isFromBot(event) {
-					continue
-				}
-
-				if !s.isBotMentioned(event) && !s.isDirectMessage(event) {
-					continue
-				}
-				go s.handleMessage(ctx, event)
-
-			case *slack.RTMError:
-				if s.errorHandler == nil {
-					continue
-				}
-				go s.errorHandler(event.Error())
-
-			case *slack.InvalidAuthEvent:
-				return errors.New(invalidToken)
-
-			default:
-				if s.defaultEventHandler == nil {
-					continue
-				}
-				go s.defaultEventHandler(event)
+			err := s.eventHandler(ctx, s, msg)
+			if err != nil {
+				return err
 			}
 		}
 	}
